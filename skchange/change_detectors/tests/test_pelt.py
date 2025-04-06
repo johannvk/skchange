@@ -43,18 +43,18 @@ def pelt_partition_cost(
     penalty: float,
 ):
     cost.fit(X)
-    n = len(X)
+    num_samples = len(X)
 
     # Add number of 'segments' * penalty to the cost.
     # Instead of number of 'changepoints' * penalty.
     total_cost = penalty * (len(changepoints) + 1)
-    np_changepoints = np.asarray(changepoints)
+    np_changepoints = np.asarray(changepoints, dtype=np.int64)
 
-    interval_starts = np.concatenate((np.array([0]), np_changepoints + 1), axis=0)
-    interval_ends = np.concatenate((np_changepoints, np.array([n - 1])), axis=0)
+    interval_starts = np.concatenate((np.array([0]), np_changepoints), axis=0)
+    interval_ends = np.concatenate((np_changepoints, np.array([num_samples])), axis=0)
 
     interval_costs = np.sum(
-        cost.evaluate(np.column_stack((interval_starts, interval_ends + 1))), axis=1
+        cost.evaluate(np.column_stack((interval_starts, interval_ends))), axis=1
     )
     total_cost += np.sum(interval_costs)
 
@@ -114,7 +114,7 @@ def run_optimal_partitioning(
     # Explicitly set the first element to -penalty, and the rest to NaN.
     # Last 'min_segment_shift' elements will be NaN.
     # opt_cost = np.concatenate((np.array([-penalty]), np.zeros(n_samples)))
-    opt_cost = np.concatenate((np.array([0.0]), np.zeros(num_obs)))
+    opt_cost = np.concatenate((np.array([0.0]), np.zeros(n_samples)))
 
     # If min_segment_length > 1, cannot compute the cost for the first
     # [1, .., min_segment_length - 1] observations.
@@ -186,6 +186,9 @@ def test_old_pelt_vs_optimal_partitioning(
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
+    # Updated definition of PELT costs, include penalty
+    # for first segment.
+    pelt_costs += penalty
 
     cost.fit(changepoint_data)
     opt_part_costs, opt_part_changepoints = run_optimal_partitioning(
@@ -198,7 +201,7 @@ def test_old_pelt_vs_optimal_partitioning(
     np.testing.assert_array_almost_equal(pelt_costs, opt_part_costs)
 
 
-@pytest.mark.xfail
+@pytest.mark.xfail(strict=True)
 def test_xfail_old_pelt_vs_optimal_partitioning_scores(
     cost: BaseCost, penalty: float, min_segment_length=2
 ):
@@ -213,6 +216,10 @@ def test_xfail_old_pelt_vs_optimal_partitioning_scores(
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
+    # Updated definition of PELT costs, include penalty
+    # for first segment.
+    pelt_costs += penalty
+
     cost.fit(X)
     opt_part_costs, _ = run_optimal_partitioning(
         cost,
@@ -292,6 +299,10 @@ def test_compare_all_pelt_functions(
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
+    # Updated definition of PELT costs, include penalty
+    # for first segment.
+    old_pelt_costs += penalty
+
     cost.fit(changepoint_data)
     opt_part_costs, opt_part_changepoints = run_optimal_partitioning(
         cost,
@@ -311,8 +322,19 @@ def test_compare_all_pelt_functions(
     np.testing.assert_array_almost_equal(old_pelt_costs, pelt_costs)
 
 
-@pytest.mark.parametrize("min_segment_length", [1, 5, 10])
-def test_pelt_on_tricky_data(cost: BaseCost, penalty: float, min_segment_length):
+@pytest.mark.parametrize(
+    "min_segment_length,percent_pruning_margin", [(1, 0.0), (5, 10.0), (10, 0.0)]
+)
+@pytest.mark.parametrize(
+    "signal_end_index", list(range(20, len(alternating_sequence), 5))
+)
+def test_pelt_on_tricky_data(
+    cost: BaseCost,
+    penalty: float,
+    min_segment_length: int,
+    signal_end_index: int,
+    percent_pruning_margin: float,
+):
     """
     Test PELT on a slightly more complex data set. There are
     change points every 20 samples, and the mean of the segments
@@ -320,39 +342,35 @@ def test_pelt_on_tricky_data(cost: BaseCost, penalty: float, min_segment_length)
     the optimal partitioning as long as the segment length is
     less than 20.
     """
-    # signal_end_index = 81
-    for signal_end_index in range(10, len(alternating_sequence)):
-        # Original "run_pelt" found 7 changepoints.
-        cost.fit(alternating_sequence[0:signal_end_index])
-        pelt_costs, pelt_changepoints = run_pelt(
-            alternating_sequence[0:signal_end_index],
-            cost,
-            penalty=penalty,
-            min_segment_length=min_segment_length,
-        )
-        pelt_changepoints = pelt_changepoints - 1  # new definition in run_pelt
-        opt_part_costs, opt_part_changepoints = run_optimal_partitioning(
-            alternating_sequence[0:signal_end_index],
-            cost,
-            penalty=penalty,
-            min_segment_length=min_segment_length,
-        )
-        # Redefined 'opt_cost' to include a penalty per segment, not per changepoint.
-        # opt_part_costs += penalty
+    # Original "run_pelt" found 7 changepoints.
+    cost.fit(alternating_sequence[0:signal_end_index])
+    pelt_costs, pelt_changepoints = run_pelt(
+        cost,
+        penalty=penalty,
+        min_segment_length=min_segment_length,
+        percent_pruning_margin=percent_pruning_margin,
+    )
 
-        assert np.all(pelt_changepoints == opt_part_changepoints)
-        np.testing.assert_almost_equal(
-            pelt_costs[-1],
-            pelt_partition_cost(
-                alternating_sequence[0:signal_end_index],
-                pelt_changepoints,
-                cost,
-                penalty=penalty,
-            ),
-            decimal=10,
-            err_msg="PELT cost for final observation does not match partition cost.",
-        )
-        np.testing.assert_array_almost_equal(pelt_costs, opt_part_costs)
+    opt_part_costs, opt_part_changepoints = run_optimal_partitioning(
+        cost,
+        penalty=penalty,
+        min_segment_length=min_segment_length,
+    )
+    opt_part_changepoints = opt_part_changepoints + 1  # new definition of changepoints
+
+    assert np.all(pelt_changepoints == opt_part_changepoints)
+    np.testing.assert_almost_equal(
+        pelt_costs[-1],
+        pelt_partition_cost(
+            alternating_sequence[0:signal_end_index],
+            pelt_changepoints,
+            cost,
+            penalty=penalty,
+        ),
+        decimal=10,
+        err_msg="PELT cost for final observation does not match partition cost.",
+    )
+    np.testing.assert_array_almost_equal(pelt_costs, opt_part_costs)
 
 
 @pytest.mark.parametrize("min_segment_length", range(1, 20))
@@ -373,7 +391,6 @@ def test_pelt_min_segment_lengths(cost: BaseCost, penalty: float, min_segment_le
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
-    pelt_changepoints = pelt_changepoints - 1  # new definition in run_pelt
 
     cost.fit(alternating_sequence)
     _, opt_part_changepoints = run_optimal_partitioning(
@@ -381,12 +398,12 @@ def test_pelt_min_segment_lengths(cost: BaseCost, penalty: float, min_segment_le
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
+    opt_part_changepoints = opt_part_changepoints + 1  # new definition of changepoints
     assert np.all(pelt_changepoints == opt_part_changepoints)
 
 
-@pytest.mark.xfail
-@pytest.mark.parametrize("min_segment_length", range(31, 40))
-def test_xfail_pelt_min_segment_lengths(
+@pytest.mark.parametrize("min_segment_length", [25] + list(range(31, 40)))
+def test_pruning_margin_fixes_pelt_min_segment_length_problems(
     cost: BaseCost, penalty: float, min_segment_length
 ):
     """
@@ -395,24 +412,30 @@ def test_xfail_pelt_min_segment_lengths(
     """
     # Original "run_pelt" found 7 changepoints.
     cost.fit(alternating_sequence)
-    _, pelt_changepoints = run_pelt(
+    # The PELT implementation fails to find the same changepoints
+    # as the optimal partitioning for these segment lengths,
+    # when the segment length is greater than 30 and
+    # the pruning margin is zero.
+    pelt_costs, pelt_changepoints = run_pelt(
         cost,
         penalty=penalty,
         min_segment_length=min_segment_length,
+        percent_pruning_margin=15.0,
     )
-    pelt_changepoints = pelt_changepoints - 1  # new definition in run_pelt
 
     cost.fit(alternating_sequence)
-    _, opt_part_changepoints = run_optimal_partitioning(
+    opt_part_costs, opt_part_changepoints = run_optimal_partitioning(
         cost,
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
+    opt_part_changepoints = opt_part_changepoints + 1  # new definition of changepoints
 
-    assert pelt_changepoints == opt_part_changepoints
+    assert np.all(pelt_changepoints == opt_part_changepoints)
+    np.testing.assert_array_almost_equal(pelt_costs, opt_part_costs)
 
 
-@pytest.mark.xfail
+@pytest.mark.xfail(strict=True)
 @pytest.mark.parametrize("min_segment_length", [25] + list(range(31, 40)))
 def test_xfail_pelt_on_tricky_data(
     cost: BaseCost, penalty: float, min_segment_length: int
@@ -428,10 +451,14 @@ def test_xfail_pelt_on_tricky_data(
     """
     # Original "run_pelt" found 7 changepoints.
     cost.fit(alternating_sequence)
+    # The PELT implementation fails to find the same changepoints
+    # as the optimal partitioning for these segment lengths,
+    # when the pruning margin is zero.
     pelt_costs, _ = run_pelt(
         cost,
         penalty=penalty,
         min_segment_length=min_segment_length,
+        percent_pruning_margin=0.0,
     )
 
     cost.fit(alternating_sequence)
@@ -440,6 +467,7 @@ def test_xfail_pelt_on_tricky_data(
         penalty=penalty,
         min_segment_length=min_segment_length,
     )
+
     np.testing.assert_array_almost_equal(pelt_costs, opt_part_costs)
 
 
