@@ -68,10 +68,13 @@ def run_pelt(
     min_segment_shift = min_segment_length - 1
 
     # Explicitly set the first element to -penalty.
-    opt_cost = np.concatenate((np.array([-penalty]), np.zeros(n_samples)))
+    # opt_cost = np.concatenate((np.array([-penalty]), np.zeros(n_samples)))
+    # Redefine Opt_cost[0] to start at 0.0, as done in 2014 PELT.
+    opt_cost = np.concatenate((np.array([0.0]), np.zeros(n_samples)))
 
     # Cannot compute the cost for the first 'min_segment_shift' elements:
-    opt_cost[1:min_segment_length] = -penalty
+    # opt_cost[1:min_segment_length] = -penalty
+    opt_cost[1:min_segment_length] = 0.0
 
     # Compute the cost in [min_segment_length, 2*min_segment_length - 1] directly:
     non_changepoint_starts = np.zeros(min_segment_length, dtype=np.int64)
@@ -81,7 +84,8 @@ def run_pelt(
     )
     costs = cost.evaluate(non_changepoint_intervals)
     agg_costs = np.sum(costs, axis=1)
-    opt_cost[min_segment_length : 2 * min_segment_length] = agg_costs
+    # opt_cost[min_segment_length : 2 * min_segment_length] = agg_costs
+    opt_cost[min_segment_length : 2 * min_segment_length] = agg_costs + penalty
 
     # Store the previous changepoint for each latest start added.
     # Used to get the final set of changepoints after the loop.
@@ -104,6 +108,7 @@ def run_pelt(
         agg_costs = np.sum(costs, axis=1)
 
         candidate_opt_costs = opt_cost[cost_eval_starts] + agg_costs + penalty
+        # candidate_opt_costs = opt_cost[cost_eval_starts] + agg_costs
 
         argmin_candidate_cost = np.argmin(candidate_opt_costs)
         opt_cost[current_obs_ind + 1] = candidate_opt_costs[argmin_candidate_cost]
@@ -111,7 +116,9 @@ def run_pelt(
 
         # Trimming the admissible starts set: (reuse the array of optimal costs)
         cost_eval_starts = cost_eval_starts[
-            candidate_opt_costs + split_cost <= opt_cost[current_obs_ind + 1] + penalty
+            # candidate_opt_costs + split_cost <= opt_cost[current_obs_ind + 1] + penalty
+            # Introduce a small tolerance to avoid numerical issues:
+            candidate_opt_costs + split_cost <= opt_cost[current_obs_ind + 1] * (1.05)
         ]
 
     return opt_cost[1:], get_changepoints(prev_cpts)
